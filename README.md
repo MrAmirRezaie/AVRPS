@@ -231,7 +231,3 @@ If you discover a security vulnerability, open a private issue on the repository
 [MrAmirRezaie](https://github.com/MrAmirRezaie)  
 Date: 2025-12-19  
 Version: 3.0.0
-
----
-
-If you'd like, I can add a CI workflow (GitHub Actions) to run tests on push/PR across platforms, and expand unit test coverage for core modules.
