@@ -6,8 +6,9 @@ Thanks for your interest in contributing to AVRPS! We welcome bug reports, featu
 
 1. Fork the repository on GitHub.
 2. Create a feature branch: git checkout -b feature/my-change.
-3. Write tests for any non-trivial changes. Tests live under 	ests/ and use pytest.
-4. Ensure style and linting pass (PEP8). Optionally run lack or uff.
+3. Write tests for any non-trivial changes. Tests live under ests/ and use pytest.
+4. Ensure style and linting pass (PEP8). Optionally run lack or
+uff.
 5. Commit and push your changes to your fork.
 6. Open a pull request describing the change and rationale.
 
