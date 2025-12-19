@@ -1,0 +1,9 @@
+requests
+urllib3
+tqdm
+colorama
+psutil
+packaging
+pyyaml
+pywin32; platform_system == "Windows"
+pytest

@@ -1,0 +1,158 @@
+{
+  "CVE-2021-44228": {
+    "cveId": "CVE-2021-44228",
+    "description": "Apache Log4j2 JNDI features do not protect against attacker controlled LDAP and other JNDI related endpoints",
+    "severity": 4,
+    "cvssScore": 10.0,
+    "cvssVector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+    "affectedPackages": [
+      "log4j-core",
+      "log4j",
+      "log4j-api"
+    ],
+    "affectedVersions": {
+      "log4j-core": [
+        "2.0-beta9",
+        "2.0-rc1",
+        "2.0",
+        "2.1",
+        "2.2",
+        "2.3",
+        "2.4",
+        "2.5",
+        "2.6",
+        "2.7",
+        "2.8",
+        "2.9",
+        "2.10",
+        "2.11",
+        "2.12",
+        "2.13",
+        "2.14",
+        "2.14.1",
+        "2.15.0",
+        "2.16.0"
+      ]
+    },
+    "fixedVersion": "2.17.0",
+    "exploitAvailable": true,
+    "exploitMaturity": "high",
+    "publishedDate": "2021-12-10T00:00:00",
+    "lastModifiedDate": "2021-12-10T00:00:00",
+    "references": [
+      "https://nvd.nist.gov/vuln/detail/CVE-2021-44228",
+      "https://logging.apache.org/log4j/2.x/security.html"
+    ],
+    "mitigation": "Update to Log4j 2.17.0 or later, or remove JndiLookup class from classpath",
+    "workaround": "Set system property 'log4j2.formatMsgNoLookups' to 'true' or remove JndiLookup class",
+    "impact": "Remote code execution",
+    "advisory": "Log4Shell vulnerability affecting millions of systems",
+    "credits": "Discovered by Chen Zhaojun of Alibaba Cloud Security Team"
+  },
+  "CVE-2021-45046": {
+    "cveId": "CVE-2021-45046",
+    "description": "Apache Log4j2 Thread Context Lookup Pattern vulnerable to remote code execution in certain non-default configurations",
+    "severity": 4,
+    "cvssScore": 9.0,
+    "cvssVector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:H/I:H/A:H",
+    "affectedPackages": [
+      "log4j-core",
+      "log4j"
+    ],
+    "affectedVersions": {
+      "log4j-core": [
+        "2.0-beta9",
+        "2.15.0"
+      ]
+    },
+    "fixedVersion": "2.16.0",
+    "exploitAvailable": true,
+    "exploitMaturity": "high",
+    "publishedDate": "2021-12-10T00:00:00",
+    "lastModifiedDate": "2021-12-10T00:00:00",
+    "references": [
+      "https://nvd.nist.gov/vuln/detail/CVE-2021-45046"
+    ],
+    "mitigation": "Update to Log4j 2.16.0 or later",
+    "workaround": "Disable thread context patterns or upgrade",
+    "impact": "Remote code execution in non-default configurations",
+    "advisory": "Follow-up to CVE-2021-44228",
+    "credits": ""
+  },
+  "CVE-2017-0144": {
+    "cveId": "CVE-2017-0144",
+    "description": "Windows SMBv1 Remote Code Execution Vulnerability (EternalBlue)",
+    "severity": 4,
+    "cvssScore": 8.5,
+    "cvssVector": "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+    "affectedPackages": [
+      "windows_smb",
+      "samba"
+    ],
+    "affectedVersions": {
+      "windows": [
+        "windows_7",
+        "windows_8.1",
+        "windows_10",
+        "windows_server_2008",
+        "windows_server_2012",
+        "windows_server_2016"
+      ]
+    },
+    "fixedVersion": "Multiple updates via MS17-010",
+    "exploitAvailable": true,
+    "exploitMaturity": "weaponized",
+    "publishedDate": "2017-03-14T00:00:00",
+    "lastModifiedDate": "2017-03-14T00:00:00",
+    "references": [
+      "https://nvd.nist.gov/vuln/detail/CVE-2017-0144",
+      "https://docs.microsoft.com/en-us/security-updates/securitybulletins/2017/ms17-010"
+    ],
+    "mitigation": "Apply Microsoft security update MS17-010, disable SMBv1",
+    "workaround": "Block TCP ports 139 and 445 at network perimeter",
+    "impact": "Remote code execution leading to wormable spread",
+    "advisory": "Used by WannaCry ransomware attack",
+    "credits": "NSA exploit leaked by Shadow Brokers"
+  },
+  "CVE-2014-0160": {
+    "cveId": "CVE-2014-0160",
+    "description": "Heartbleed bug in OpenSSL - buffer over-read in TLS heartbeat extension",
+    "severity": 4,
+    "cvssScore": 7.5,
+    "cvssVector": "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+    "affectedPackages": [
+      "openssl"
+    ],
+    "affectedVersions": {
+      "openssl": [
+        "1.0.1",
+        "1.0.1a",
+        "1.0.1b",
+        "1.0.1c",
+        "1.0.1d",
+        "1.0.1e",
+        "1.0.1f",
+        "1.0.1g",
+        "1.0.1h",
+        "1.0.1i",
+        "1.0.1j",
+        "1.0.1k",
+        "1.0.1l"
+      ]
+    },
+    "fixedVersion": "1.0.1g",
+    "exploitAvailable": true,
+    "exploitMaturity": "high",
+    "publishedDate": "2014-04-07T00:00:00",
+    "lastModifiedDate": "2014-04-07T00:00:00",
+    "references": [
+      "https://nvd.nist.gov/vuln/detail/CVE-2014-0160",
+      "https://heartbleed.com/"
+    ],
+    "mitigation": "Update OpenSSL to 1.0.1g or later, reissue SSL certificates",
+    "workaround": "Disable TLS heartbeat extension",
+    "impact": "Information disclosure of up to 64KB of memory per request",
+    "advisory": "Critical vulnerability affecting ~17% of internet's secure web servers",
+    "credits": "Discovered by Neel Mehta of Google Security"
+  }
+}

@@ -1,0 +1,23 @@
+[project]
+name = "avrps"
+version = "3.0.0"
+description = "Advanced Vulnerability Remediation and Patching System"
+readme = "README.md"
+authors = [{ name = "mr_h4shtag", url = "https://github.com/mr_h4shtag" }]
+requires-python = ">=3.7"
+
+[project.dependencies]
+requests = "*"
+urllib3 = "*"
+tqdm = "*"
+colorama = "*"
+psutil = "*"
+packaging = "*"
+pyyaml = "*"
+
+[project.optional-dependencies]
+windows = ["pywin32; platform_system == \"Windows\""]
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"

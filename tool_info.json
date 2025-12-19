@@ -1,0 +1,15 @@
+﻿{
+  "name": "AVRPS",
+  "version": "3.0.0",
+  "description": "Advanced Vulnerability Remediation and Patching System - cross-platform vulnerability detection and remediation",
+  "author": {
+    "name": "mr_h4shtag",
+    "github": "https://github.com/mr_h4shtag",
+    "email": ""
+  },
+  "repository": "https://github.com/mr_h4shtag/AVRPS",
+  "license": "MIT",
+  "contact": {
+    "issues": "https://github.com/mr_h4shtag/AVRPS/issues"
+  }
+}
