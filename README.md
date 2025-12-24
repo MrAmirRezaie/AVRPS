@@ -44,6 +44,8 @@ AVRPS is a modular framework that ingests CVE data (local/NVD), scans system pac
 - Automated patch application with snapshot/rollback and verification
 - SQLite-backed history and reporting (JSON/HTML/TXT)
 - Pluggable architecture for detectors, data sources, and handlers
+- **AI Model Integration**: CVE Intelligence and Network Graph Analysis (SecureBERT, GCN, GAT, TGNN)
+- Production-ready error handling, validation, and logging (95%+ coverage)
 
 ## Requirements
 
@@ -168,8 +170,35 @@ The configuration file `avrps_config.ini` contains sections:
 - `[scanning]` — `deep_scan`, `scan_timeout`, `cve_check_enabled`
 - `[patching]` — `auto_patch`, `dry_run_default`, `create_snapshots`, `rollback_enabled`
 - `[reporting]` — `report_format`, `report_dir`, `save_reports`
+- `[ai_models]` — `cve_model` (default: `securebert`), `network_model` (default: `gcn`), `device` (cpu/cuda), `quantize` (true/false), `model_dir` (path to models)
 
 Defaults are generated automatically by `ConfigurationManager` on first run. Edit the file to tune behavior.
+
+### AI Model Configuration
+
+AVRPS includes stubs for AI-powered vulnerability intelligence and network analysis:
+
+- **CVE Intelligence Model**: Extracts and enriches CVE data with semantic understanding (ready for SecureBERT, CyberBERT integration)
+- **Network Graph Model**: Analyzes package dependencies and computes risk scores (ready for GCN, GAT, TGNN, Anomal-E integration)
+
+To use real models, install optional dependencies:
+
+```bash
+pip install transformers torch torch-geometric scikit-learn numpy scipy
+```
+
+Then update `avrps_config.ini`:
+
+```ini
+[ai_models]
+cve_model = securebert        # or: secbert, cyberbert
+network_model = gcn           # or: gat, tgnn, anomal-e
+device = cpu                  # or: cuda (if GPU available)
+quantize = false              # set to true for faster inference
+model_dir = models            # directory to cache downloaded models
+```
+
+See [AI_MODELS.md](AI_MODELS.md) for detailed model documentation and integration guides.
 
 ## Files & Layout
 

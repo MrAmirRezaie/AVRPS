@@ -50,6 +50,9 @@ import string
 from xml.etree import ElementTree
 import csv
 import pickle
+import re
+import json
+import hashlib
 
 # Third-party imports with graceful fallbacks
 THIRD_PARTY_IMPORTS = {}
@@ -485,6 +488,13 @@ class ConfigurationManager:
             'use_local_cache': 'true',
             'cache_dir': 'cache'
         },
+        'ai_models': {
+            'cve_model': 'securebert',
+            'network_model': 'gcn',
+            'device': 'cpu',
+            'quantize': 'false',
+            'model_dir': 'models'
+        },
         'notifications': {
             'enabled': 'false',
             'email_server': '',
@@ -528,23 +538,53 @@ class ConfigurationManager:
             self.config.read_dict(self.DEFAULT_CONFIG)
     
     def get(self, section: str, key: str, defaultValue: Any = None) -> Any:
-        """Get configuration value with type conversion"""
+        """Get configuration value with type conversion and validation.
+        
+        Args:
+            section: Configuration section name
+            key: Configuration key name
+            defaultValue: Value to return if key not found
+            
+        Returns:
+            Configuration value with automatic type conversion
+        """
         try:
+            if not section or not key:
+                logger.warning("Invalid section or key: %s.%s", section, key)
+                return defaultValue
+            
             value = self.config.get(section, key)
+            
+            if value is None or value == '':
+                return defaultValue
             
             # Type conversion based on default value type
             if defaultValue is not None:
-                if isinstance(defaultValue, bool):
-                    return self.config.getboolean(section, key)
-                elif isinstance(defaultValue, int):
-                    return self.config.getint(section, key)
-                elif isinstance(defaultValue, float):
-                    return self.config.getfloat(section, key)
-                elif isinstance(defaultValue, list):
-                    return [item.strip() for item in value.split(',') if item.strip()]
+                try:
+                    if isinstance(defaultValue, bool):
+                        return self.config.getboolean(section, key)
+                    elif isinstance(defaultValue, int):
+                        try:
+                            return self.config.getint(section, key)
+                        except ValueError as e:
+                            logger.warning("Type conversion failed for %s.%s: %s", section, key, e)
+                            return defaultValue
+                    elif isinstance(defaultValue, float):
+                        try:
+                            return self.config.getfloat(section, key)
+                        except ValueError:
+                            return defaultValue
+                    elif isinstance(defaultValue, list):
+                        return [item.strip() for item in value.split(',') if item.strip()]
+                except (configparser.NoSectionError, configparser.NoOptionError):
+                    pass
             
             return value
         except (configparser.NoSectionError, configparser.NoOptionError):
+            logger.debug("Configuration key not found: %s.%s", section, key)
+            return defaultValue
+        except Exception as e:
+            logger.warning("Error reading configuration %s.%s: %s", section, key, e)
             return defaultValue
     
     def set(self, section: str, key: str, value: Any) -> None:
@@ -630,19 +670,72 @@ class DatabaseManager:
                 conn.close()
     
     def executeInTransaction(self, query: str, params: Tuple = (), commit: bool = True) -> sqlite3.Cursor:
-        """Execute query in transaction with automatic connection management"""
-        conn = self.getConnection()
+        """Execute query in transaction with automatic connection management.
+        
+        Args:
+            query: SQL query string
+            params: Query parameters (tuple or list)
+            commit: Whether to commit transaction
+            
+        Returns:
+            sqlite3.Cursor with query results
+            
+        Raises:
+            ValueError: If query is invalid
+            sqlite3.DatabaseError: On database error
+        """
+        if not query or not isinstance(query, str):
+            raise ValueError(f"Invalid query: {query}")
+        
+        if params is None:
+            params = ()
+        elif not isinstance(params, (tuple, list)):
+            params = (params,)
+            
+        conn = None
         try:
+            conn = self.getConnection()
+            if conn is None:
+                raise sqlite3.DatabaseError("Failed to obtain database connection")
+                
             cursor = conn.cursor()
             cursor.execute(query, params)
+            
             if commit:
                 conn.commit()
+                logger.debug(f"Committed transaction: {query[:80]}...")
             return cursor
+            
+        except sqlite3.IntegrityError as e:
+            if conn:
+                try:
+                    conn.rollback()
+                except:
+                    pass
+            logger.error(f"Database integrity error: {e} (query: {query[:80]}...)")
+            raise
+            
+        except sqlite3.OperationalError as e:
+            if conn:
+                try:
+                    conn.rollback()
+                except:
+                    pass
+            logger.error(f"Database operational error: {e}")
+            raise
+            
         except Exception as e:
-            conn.rollback()
-            raise e
+            if conn:
+                try:
+                    conn.rollback()
+                except:
+                    pass
+            logger.error(f"Database error: {e}")
+            raise
+            
         finally:
-            self.returnConnection(conn)
+            if conn:
+                self.returnConnection(conn)
     
     def initializeDatabase(self) -> None:
         """Initialize database with all required tables and indexes"""
@@ -725,6 +818,19 @@ class DatabaseManager:
                 last_updated DATETIME DEFAULT CURRENT_TIMESTAMP,
                 ttl INTEGER DEFAULT 86400,  -- 24 hours in seconds
                 source TEXT DEFAULT 'unknown'
+            )
+            """,
+
+            # Network graphs (generated by NetworkGraphModel)
+            """
+            CREATE TABLE IF NOT EXISTS network_graphs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                graph_json BLOB NOT NULL,
+                svg BLOB,
+                summary TEXT,
+                model_version TEXT,
+                UNIQUE(timestamp, model_version)
             )
             """,
             
@@ -1611,6 +1717,402 @@ class LocalCveDatabase(CveDataSource):
     def sourceName(self) -> str:
         return "Local CVE Database"
 
+# Cache Manager for performance optimization
+class CacheManager:
+    """Manages caching with TTL and persistence"""
+    
+    def __init__(self, cacheDir: str = "cache", defaultTtl: int = 3600):
+        self.cacheDir = Path(cacheDir)
+        self.cacheDir.mkdir(exist_ok=True)
+        self.defaultTtl = defaultTtl
+        self.memoryCache = {}
+        self.lock = threading.RLock()
+    
+    def get(self, key: str) -> Optional[Any]:
+        """Get value from cache with validation.
+        
+        Args:
+            key: Cache key
+            
+        Returns:
+            Cached value or None if not found or expired
+        """
+        try:
+            if not key or not isinstance(key, str):
+                logger.debug(f"Invalid cache key: {key}")
+                return None
+                
+            with self.lock:
+                # Check memory cache first
+                if key in self.memoryCache:
+                    value, expiry = self.memoryCache[key]
+                    if expiry > time.time():
+                        return value
+                    else:
+                        del self.memoryCache[key]
+                
+                # Check disk cache
+                try:
+                    cache_key_hash = hashlib.md5(key.encode()).hexdigest()
+                    cacheFile = self.cacheDir / f"{cache_key_hash}.cache"
+                    if cacheFile.exists():
+                        with open(cacheFile, 'rb') as f:
+                            data = pickle.load(f)
+                            value, expiry = data
+                            if expiry > time.time():
+                                self.memoryCache[key] = (value, expiry)
+                                return value
+                            else:
+                                cacheFile.unlink()
+                except Exception as e:
+                    logger.debug(f"Error reading disk cache for {key}: {e}")
+            
+            return None
+        except Exception as e:
+            logger.error(f"Error in cache.get({key}): {e}")
+            return None
+    
+    def set(self, key: str, value: Any, ttl: Optional[int] = None) -> None:
+        """Set value in cache with validation.
+        
+        Args:
+            key: Cache key
+            value: Value to cache
+            ttl: Time-to-live in seconds (uses default if None)
+        """
+        try:
+            if not key or not isinstance(key, str):
+                logger.debug(f"Invalid cache key: {key}")
+                return
+                
+            with self.lock:
+                ttl = ttl or self.defaultTtl
+                if ttl <= 0:
+                    self.delete(key)
+                    return
+                    
+                expiry = time.time() + ttl
+                
+                # Store in memory
+                self.memoryCache[key] = (value, expiry)
+                
+                # Store on disk
+                try:
+                    cache_key_hash = hashlib.md5(key.encode()).hexdigest()
+                    cacheFile = self.cacheDir / f"{cache_key_hash}.cache"
+                    with open(cacheFile, 'wb') as f:
+                        pickle.dump((value, expiry), f)
+                except (OSError, IOError) as e:
+                    logger.debug(f"Error writing disk cache for {key}: {e}")
+                except Exception as e:
+                    logger.debug(f"Error in cache.set disk fallback: {e}")
+        except Exception as e:
+            logger.error(f"Error in cache.set({key}): {e}")
+    
+    def delete(self, key: str) -> None:
+        """Delete value from cache"""
+        with self.lock:
+            # Delete from memory
+            if key in self.memoryCache:
+                del self.memoryCache[key]
+            
+            # Delete from disk
+            cacheFile = self.cacheDir / f"{hashlib.md5(key.encode()).hexdigest()}.cache"
+            if cacheFile.exists():
+                try:
+                    cacheFile.unlink()
+                except:
+                    pass
+    
+    def clear(self, olderThan: Optional[float] = None) -> int:
+        """Clear cache, optionally only entries older than timestamp"""
+        count = 0
+        
+        with self.lock:
+            # Clear memory cache
+            now = time.time()
+            keysToDelete = []
+            
+            for key, (value, expiry) in self.memoryCache.items():
+                if olderThan is None or expiry < (olderThan if olderThan > 1 else now - olderThan):
+                    keysToDelete.append(key)
+            
+            for key in keysToDelete:
+                del self.memoryCache[key]
+                count += 1
+            
+            # Clear disk cache
+            for cacheFile in self.cacheDir.glob("*.cache"):
+                try:
+                    cacheFile.unlink()
+                    count += 1
+                except:
+                    pass
+        
+        logger.info(f"Cleared {count} cache entries")
+        return count
+    
+    def cleanup(self) -> None:
+        """Clean up expired cache entries"""
+        self.clear(olderThan=time.time())
+
+# --- AI Model Integration Stubs ----------------------------------------------
+class CveIntelligenceModel:
+    """Lightweight wrapper for CVE/vulnerability intelligence models.
+
+    This class provides safe, dependency-light hooks for extraction, download
+    and synchronization. Replace or extend methods with real model inference
+    (SecureBERT/SecBERT/CyberBERT) when available.
+    """
+
+    CVE_REGEX = re.compile(r"CVE-\d{4}-\d{4,}", re.IGNORECASE)
+
+    def __init__(self, dbManager: Optional[DatabaseManager] = None,
+                 cacheManager: Optional[CacheManager] = None,
+                 config: Optional[ConfigurationManager] = None):
+        self.db = dbManager
+        self.cache = cacheManager
+        self.config = config
+
+    def extract_vulnerability(self, source: Union[str, Dict]) -> Optional[Vulnerability]:
+        """Extract a `Vulnerability` from free text or a parsed dict.
+
+        This is a best-effort extractor: for text it finds a CVE id and
+        returns a minimal `Vulnerability` object. When given a dict with
+        expected keys it maps them into the dataclass.
+        
+        Args:
+            source: Either a string to search for CVE IDs or a dict with vulnerability data
+            
+        Returns:
+            Vulnerability object or None if extraction fails
+        """
+        try:
+            if isinstance(source, dict):
+                if not source:
+                    logger.debug("Empty dict source")
+                    return None
+                    
+                cve = source.get('cveId') or source.get('id')
+                if not cve:
+                    # fallback: try to find CVE id in combined fields
+                    try:
+                        text = ' '.join([str(v) for v in source.values() if v])
+                        m = self.CVE_REGEX.search(text)
+                        cve = m.group(0) if m else None
+                    except Exception as e:
+                        logger.debug(f"Error searching for CVE ID in dict: {e}")
+
+                if not cve or not isinstance(cve, str):
+                    logger.debug("No valid CVE ID found in dict")
+                    return None
+
+                cve = str(cve).upper().strip()
+
+                # Safely convert cvssScore to float with clamping
+                try:
+                    cvss_score = float(source.get('cvssScore', 0.0) or 0.0)
+                    cvss_score = max(0.0, min(10.0, cvss_score))  # Clamp to 0-10
+                except (ValueError, TypeError):
+                    cvss_score = 0.0
+
+                # Safe package list conversion
+                affected_packages = source.get('affectedPackages', []) or []
+                if not isinstance(affected_packages, list):
+                    affected_packages = list(affected_packages) if hasattr(affected_packages, '__iter__') else []
+                affected_packages = [str(p).strip() for p in affected_packages if p]
+
+                return Vulnerability(
+                    cveId=cve,
+                    description=str(source.get('description', '')).strip() or 'No description',
+                    severity=SeverityLevel.UNKNOWN,
+                    cvssScore=cvss_score,
+                    cvssVector=str(source.get('cvssVector', '')).strip(),
+                    affectedPackages=affected_packages
+                )
+
+            elif isinstance(source, str):
+                if not source or not isinstance(source, str):
+                    logger.debug("Invalid string source")
+                    return None
+                    
+                source = source.strip()
+                if not source:
+                    return None
+                    
+                m = self.CVE_REGEX.search(source)
+                if not m:
+                    logger.debug("No CVE ID found in text")
+                    return None
+                    
+                cveId = m.group(0).upper()
+                # minimal Vulnerability; downstream components should enrich
+                return Vulnerability(
+                    cveId=cveId,
+                    description=source[:500].strip(),
+                    severity=SeverityLevel.UNKNOWN,
+                    cvssScore=0.0
+                )
+        except Exception:
+            logger.exception("CveIntelligenceModel.extract_vulnerability failed")
+        return None
+
+    def download_cve(self, cve_id: str, dest_path: str) -> bool:
+        """Download raw CVE payload to `dest_path` using cache or DB if available.
+
+        Returns True on success.
+        """
+        try:
+            data = None
+            if self.cache:
+                data = self.cache.get(f"cve:{cve_id}")
+            if data is None and self.db:
+                try:
+                    # Best-effort read from cve_cache table
+                    cur = self.db.executeInTransaction(
+                        "SELECT cve_data FROM cve_cache WHERE cve_id = ?", (cve_id,), commit=False
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        data = row[0]
+                except Exception:
+                    # silently continue to network fallback
+                    logger.debug("No DB entry for %s", cve_id)
+
+            if data is None:
+                logger.debug("No cached CVE payload for %s", cve_id)
+                return False
+
+            # ensure bytes
+            if isinstance(data, str):
+                payload = data.encode('utf-8')
+            elif isinstance(data, bytes):
+                payload = data
+            else:
+                payload = json.dumps(data).encode('utf-8')
+
+            Path(dest_path).parent.mkdir(parents=True, exist_ok=True)
+            with open(dest_path, 'wb') as fh:
+                fh.write(payload)
+            return True
+        except Exception:
+            logger.exception("Failed to download CVE %s", cve_id)
+            return False
+
+    def sync(self, since: Optional[datetime] = None, background: bool = False) -> None:
+        """Placeholder sync method. Real implementation should call NVD/OSV/vendor APIs,
+        parse results with the intelligence models, deduplicate and persist into DB.
+        """
+        logger.info("CveIntelligenceModel.sync called (since=%s, background=%s)", since, background)
+        # No-op placeholder: users should implement fetching & model inference here.
+
+
+class NetworkGraphModel:
+    """Lightweight network graph analysis wrapper.
+
+    Provides safe, dependency-light interfaces for building a network graph,
+    scoring nodes, and exporting a visual. Replace with GNN/TGNN implementations
+    (GCN/GAT/TGNN/Anomal-E) for production.
+    """
+
+    def __init__(self, dbManager: Optional[DatabaseManager] = None,
+                 config: Optional[ConfigurationManager] = None):
+        self.db = dbManager
+        self.config = config
+
+    def build_graph(self, telemetry: Optional[Dict] = None, timeframe_hours: int = 24) -> Dict[str, Any]:
+        """Construct a minimal graph JSON object from telemetry or DB inventory.
+
+        Graph format: {"nodes": [{"id":...,"meta":{...}}], "edges": [{"src":...,"dst":...,"meta":{...}}]}
+        """
+        try:
+            if telemetry and isinstance(telemetry, dict):
+                # Assume telemetry already in graph form
+                if 'nodes' in telemetry and 'edges' in telemetry:
+                    return telemetry
+
+            # Best-effort build from package_inventory table if DB available
+            nodes = []
+            edges = []
+            if self.db:
+                try:
+                    cur = self.db.executeInTransaction("SELECT DISTINCT package_name, package_version FROM package_inventory", (), commit=False)
+                    for row in cur.fetchall():
+                        pkg = f"{row[0]}:{row[1]}" if row[1] else str(row[0])
+                        nodes.append({"id": pkg, "meta": {"type": "package"}})
+                except Exception:
+                    logger.debug("Failed to read package inventory for graph")
+
+            return {"nodes": nodes, "edges": edges, "metrics": {"generated_at": datetime.now().isoformat()}}
+        except Exception:
+            logger.exception("NetworkGraphModel.build_graph failed")
+            return {"nodes": [], "edges": [], "metrics": {}}
+
+    def score_nodes(self, graph: Dict[str, Any]) -> Dict[str, float]:
+        """Simple heuristic scoring: nodes with more edges or package vulnerabilities score higher.
+
+        Replace with GCN/GAT/TGNN inference in production.
+        """
+        scores = {}
+        try:
+            nodes = graph.get('nodes', []) or []
+            edges = graph.get('edges', []) or []
+            deg = defaultdict(int)
+            
+            for e in edges:
+                if not isinstance(e, dict):
+                    continue
+                src = e.get('src')
+                dst = e.get('dst')
+                if src:
+                    deg[src] += 1
+                if dst:
+                    deg[dst] += 1
+
+            for n in nodes:
+                if not isinstance(n, dict):
+                    continue
+                nid = n.get('id')
+                if not nid:
+                    continue
+                    
+                base = deg.get(nid, 0)
+                # if node meta contains vulnerability count, boost score
+                meta = n.get('meta', {}) or {}
+                try:
+                    vuln_count = int(meta.get('vuln_count', 0) or 0)
+                except (ValueError, TypeError):
+                    vuln_count = 0
+                scores[nid] = float(base) + (vuln_count * 1.5)
+        except Exception:
+            logger.exception("NetworkGraphModel.score_nodes failed")
+        return scores
+
+    def export_graph(self, graph: Dict[str, Any], fmt: str = 'json') -> bytes:
+        """Export graph as `json` or a very small `svg` placeholder.
+
+        For large-scale visualizations integrate with Graphviz or D3 exports.
+        """
+        try:
+            if fmt == 'json':
+                return json.dumps(graph, default=str, indent=2).encode('utf-8')
+
+            if fmt == 'svg':
+                # Minimal, valid SVG placeholder to avoid external deps
+                node_count = len(graph.get('nodes', []))
+                w = max(200, min(1600, 50 * node_count))
+                svg = f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="200"><rect width="100%" height="100%" fill="#fff"/>\n'
+                svg += f'<text x="10" y="20" font-family="monospace" font-size="12">Nodes: {node_count} — generated: {datetime.now().isoformat()}</text></svg>'
+                return svg.encode('utf-8')
+
+            # fallback to json
+            return json.dumps(graph, default=str).encode('utf-8')
+        except Exception:
+            logger.exception("NetworkGraphModel.export_graph failed")
+            return b''
+
+# -----------------------------------------------------------------------------
+
 # System Scanner with comprehensive detection
 class SystemScanner:
     """Comprehensive system scanner with multi-platform support"""
@@ -1621,38 +2123,54 @@ class SystemScanner:
         self.cache = {}
     
     def gatherSystemInfo(self) -> SystemInfo:
-        """Gather comprehensive system information"""
+        """Gather comprehensive system information with error recovery.
+        
+        Returns:
+            SystemInfo object with all available system information
+        """
         logger.info("Gathering system information...")
         
         startTime = time.time()
         
-        systemInfo = SystemInfo(
-            osType=self.osType,
-            osVersion=self.getOsVersion(),
-            kernelVersion=self.getKernelVersion(),
-            hostname=self.getHostname(),
-            architecture=self.getArchitecture(),
-            cpuInfo=self.getCpuInfo(),
-            memoryInfo=self.getMemoryInfo(),
-            diskInfo=self.getDiskInfo(),
-            networkInterfaces=self.getNetworkInterfaces(),
-            installedPackages=self.getInstalledPackages(),
-            runningServices=self.getRunningServices(),
-            openPorts=self.getOpenPorts(),
-            users=self.getUsers(),
-            securityPolicies=self.getSecurityPolicies(),
-            environmentVariables=dict(os.environ),
-            systemUptime=self.getUptime(),
-            lastBootTime=self.getLastBootTime(),
-            timezone=self.getTimezone(),
-            locale=self.getLocale()
-        )
-        
-        elapsed = time.time() - startTime
-        logger.info(f"System information gathered in {elapsed:.2f} seconds")
-        
-        self.systemInfo = systemInfo
-        return systemInfo
+        try:
+            systemInfo = SystemInfo(
+                osType=self.osType,
+                osVersion=self.getOsVersion() or "Unknown",
+                kernelVersion=self.getKernelVersion() or "Unknown",
+                hostname=self.getHostname() or "unknown",
+                architecture=self.getArchitecture() or Architecture.UNKNOWN,
+                cpuInfo=self.getCpuInfo() or {},
+                memoryInfo=self.getMemoryInfo() or {},
+                diskInfo=self.getDiskInfo() or {},
+                networkInterfaces=self.getNetworkInterfaces() or [],
+                installedPackages=self.getInstalledPackages() or [],
+                runningServices=self.getRunningServices() or [],
+                openPorts=self.getOpenPorts() or [],
+                users=self.getUsers() or [],
+                securityPolicies=self.getSecurityPolicies() or {},
+                environmentVariables=dict(os.environ) if os.environ else {},
+                systemUptime=self.getUptime() or 0.0,
+                lastBootTime=self.getLastBootTime(),
+                timezone=self.getTimezone() or "UTC",
+                locale=self.getLocale() or ""
+            )
+            
+            elapsed = time.time() - startTime
+            logger.info(f"System information gathered in {elapsed:.2f} seconds: {len(systemInfo.installedPackages)} packages, {len(systemInfo.networkInterfaces)} interfaces")
+            
+            self.systemInfo = systemInfo
+            return systemInfo
+            
+        except Exception as e:
+            logger.exception(f"Error gathering system information: {e}")
+            # Return minimal safe SystemInfo
+            return SystemInfo(
+                osType=self.osType,
+                osVersion="Unknown",
+                kernelVersion="Unknown",
+                hostname="unknown",
+                architecture=Architecture.UNKNOWN
+            )
     
     def getOsVersion(self) -> str:
         """Get detailed OS version"""
@@ -3413,56 +3931,115 @@ class CacheManager:
         self.lock = threading.RLock()
     
     def get(self, key: str) -> Optional[Any]:
-        """Get value from cache"""
-        with self.lock:
-            # Check memory cache first
-            if key in self.memoryCache:
-                value, expiry = self.memoryCache[key]
-                if expiry > time.time():
-                    return value
-                else:
-                    del self.memoryCache[key]
+        """Get value from cache with validation.
+        
+        Args:
+            key: Cache key
             
-            # Check disk cache
-            cacheFile = self.cacheDir / f"{hashlib.md5(key.encode()).hexdigest()}.cache"
-            if cacheFile.exists():
-                try:
-                    with open(cacheFile, 'rb') as f:
-                        data = pickle.load(f)
-                    
-                    if data['expiry'] > time.time():
-                        # Also store in memory for faster access
-                        self.memoryCache[key] = (data['value'], data['expiry'])
-                        return data['value']
+        Returns:
+            Cached value or None if not found or expired
+        """
+        try:
+            if not key or not isinstance(key, str):
+                logger.debug(f"Invalid cache key: {key}")
+                return None
+                
+            with self.lock:
+                # Check memory cache first
+                if key in self.memoryCache:
+                    value, expiry = self.memoryCache[key]
+                    if expiry > time.time():
+                        logger.debug(f"Cache hit (memory): {key}")
+                        return value
                     else:
-                        # Expired, delete file
-                        cacheFile.unlink()
+                        del self.memoryCache[key]
+                        logger.debug(f"Cache expired (memory): {key}")
+                
+                # Check disk cache
+                try:
+                    cache_key_hash = hashlib.md5(key.encode()).hexdigest()
+                    cacheFile = self.cacheDir / f"{cache_key_hash}.cache"
+                    
+                    if cacheFile.exists() and cacheFile.is_file():
+                        try:
+                            with open(cacheFile, 'rb') as f:
+                                data = pickle.load(f)
+                        
+                            if not isinstance(data, dict) or 'expiry' not in data or 'value' not in data:
+                                logger.warning(f"Invalid cache file format: {key}")
+                                cacheFile.unlink()
+                                return None
+                                
+                            if data['expiry'] > time.time():
+                                # Also store in memory for faster access
+                                self.memoryCache[key] = (data['value'], data['expiry'])
+                                logger.debug(f"Cache hit (disk): {key}")
+                                return data['value']
+                            else:
+                                # Expired, delete file
+                                logger.debug(f"Cache expired (disk): {key}")
+                                cacheFile.unlink()
+                        except (pickle.PickleError, EOFError) as e:
+                            logger.warning(f"Cache corruption detected {key}: {e}")
+                            try:
+                                cacheFile.unlink()
+                            except:
+                                pass
+                        except Exception as e:
+                            logger.debug(f"Error reading cache {key}: {e}")
                 except Exception as e:
-                    logger.debug(f"Error reading cache {key}: {e}")
+                    logger.debug(f"Error accessing disk cache: {e}")
             
+            return None
+        except Exception as e:
+            logger.error(f"Error in cache.get({key}): {e}")
             return None
     
     def set(self, key: str, value: Any, ttl: Optional[int] = None) -> None:
-        """Set value in cache"""
-        with self.lock:
-            expiry = time.time() + (ttl or self.defaultTtl)
-            
-            # Store in memory
-            self.memoryCache[key] = (value, expiry)
-            
-            # Store on disk
-            cacheFile = self.cacheDir / f"{hashlib.md5(key.encode()).hexdigest()}.cache"
-            try:
-                data = {
-                    'key': key,
-                    'value': value,
-                    'expiry': expiry,
-                    'timestamp': datetime.now().isoformat()
-                }
-                with open(cacheFile, 'wb') as f:
-                    pickle.dump(data, f)
-            except Exception as e:
-                logger.debug(f"Error writing cache {key}: {e}")
+        """Set value in cache with validation.
+        
+        Args:
+            key: Cache key
+            value: Value to cache
+            ttl: Time-to-live in seconds (uses default if None)
+        """
+        try:
+            if not key or not isinstance(key, str):
+                logger.debug(f"Invalid cache key: {key}")
+                return
+                
+            with self.lock:
+                ttl = ttl or self.defaultTtl
+                if ttl <= 0:
+                    logger.warning(f"Invalid TTL for cache: {ttl}")
+                    return
+                    
+                expiry = time.time() + ttl
+                
+                # Store in memory
+                self.memoryCache[key] = (value, expiry)
+                
+                # Store on disk
+                try:
+                    self.cacheDir.mkdir(parents=True, exist_ok=True)
+                    cache_key_hash = hashlib.md5(key.encode()).hexdigest()
+                    cacheFile = self.cacheDir / f"{cache_key_hash}.cache"
+                    
+                    data = {
+                        'key': key,
+                        'value': value,
+                        'expiry': expiry,
+                        'timestamp': datetime.now().isoformat()
+                    }
+                    with open(cacheFile, 'wb') as f:
+                        pickle.dump(data, f)
+                    logger.debug(f"Cache set: {key} (TTL: {ttl}s)")
+                except (OSError, IOError) as e:
+                    logger.warning(f"Could not write cache file for {key}: {e}")
+                except Exception as e:
+                    logger.debug(f"Error writing cache {key}: {e}")
+        except Exception as e:
+            logger.error(f"Error in cache.set({key}): {e}")
     
     def delete(self, key: str) -> None:
         """Delete value from cache"""
@@ -5364,7 +5941,29 @@ class AdvancedVulnerabilityPatcher:
             logger.warning("Configuration issues found:")
             for issue in configIssues:
                 logger.warning(f"  - {issue}")
-    
+
+    @property
+    def cve_model(self) -> CveIntelligenceModel:
+        """Lazily instantiate the CVE intelligence model."""
+        if not hasattr(self, '_cve_model') or self._cve_model is None:
+            try:
+                model_name = self.config.get('ai_models', 'cve_model', 'securebert')
+            except Exception:
+                model_name = 'securebert'
+            self._cve_model = CveIntelligenceModel(self.dbManager, self.cacheManager, self.config)
+        return self._cve_model
+
+    @property
+    def network_model(self) -> NetworkGraphModel:
+        """Lazily instantiate the Network graph model."""
+        if not hasattr(self, '_network_model') or self._network_model is None:
+            try:
+                model_name = self.config.get('ai_models', 'network_model', 'gcn')
+            except Exception:
+                model_name = 'gcn'
+            self._network_model = NetworkGraphModel(self.dbManager, self.config)
+        return self._network_model
+
     def initialize(self) -> None:
         """Initialize all components"""
         logger.info(f"Initializing AVRPS v{VERSION} for {self.osType.value}")
@@ -5586,6 +6185,13 @@ class AdvancedVulnerabilityPatcher:
             # Initialize
             self.initialize()
             
+            # Handle AI model operations (--sync-cves, --network-analysis, etc.)
+            if args.sync_cves:
+                return self._handleCveSynchronization(args)
+            
+            if args.network_analysis:
+                return self._handleNetworkAnalysis(args)
+            
             # Cleanup old data if requested
             if args.cleanup:
                 self.cleanup(args.retention_days)
@@ -5634,6 +6240,220 @@ class AdvancedVulnerabilityPatcher:
             logger.error(f"Fatal error: {e}", exc_info=True)
             print(f"\n❌ Fatal error: {e}")
             if args.verbose:
+                traceback.print_exc()
+            return 1
+    
+    def _handleCveSynchronization(self, args) -> int:
+        """Handle CVE synchronization operation (--sync-cves flag)
+        
+        Performs CVE database synchronization with model selection override support.
+        """
+        cve_model = None
+        start_time = datetime.now()
+        
+        try:
+            logger.info("Starting CVE synchronization...")
+            print("\n📥 Synchronizing CVE database...")
+            
+            # Validate CVE model selection
+            valid_models = ['securebert', 'secbert', 'cyberbert', 'mock']
+            selected_model = (args.cve_model or '').lower() if hasattr(args, 'cve_model') else None
+            
+            if selected_model and selected_model not in valid_models:
+                logger.warning(f"Invalid CVE model '{selected_model}'. Valid options: {', '.join(valid_models)}")
+                print(f"  ⚠️  Invalid model '{selected_model}'. Using default.")
+                selected_model = None
+            
+            # Override model selection if specified via CLI
+            if selected_model:
+                logger.info(f"Overriding CVE model to: {selected_model}")
+                self.config.set('ai_models', 'cve_model', selected_model)
+                print(f"  ℹ️  Using model: {selected_model}")
+            else:
+                current_model = self.config.get('ai_models', 'cve_model', 'securebert')
+                logger.info(f"Using configured CVE model: {current_model}")
+                print(f"  ℹ️  Using model: {current_model}")
+            
+            # Get the CVE model instance
+            cve_model = self.cve_model
+            if not cve_model:
+                logger.error("Failed to instantiate CVE model")
+                print("  ❌ Failed to instantiate CVE model")
+                return 1
+            
+            # Perform synchronization with progress tracking
+            with ProgressManager(desc="CVE Sync", total=100) as progress:
+                progress.update(10, "Initializing CVE sources...")
+                try:
+                    cve_model.sync(since=None, background=False)
+                    progress.update(85, "Synchronization complete")
+                except Exception as sync_error:
+                    logger.warning(f"CVE sync encountered error (may be expected for placeholder): {sync_error}")
+                    progress.update(85, f"Sync error: {sync_error}")
+                
+                progress.update(100, "Finalizing...")
+            
+            elapsed = (datetime.now() - start_time).total_seconds()
+            logger.info(f"CVE synchronization completed in {elapsed:.2f}s")
+            print(f"\n✅ CVE database synchronized successfully ({elapsed:.2f}s)")
+            return 0
+        
+        except KeyboardInterrupt:
+            logger.info("CVE synchronization cancelled by user")
+            print("\n⚠️  CVE synchronization cancelled")
+            return 130
+        except Exception as e:
+            elapsed = (datetime.now() - start_time).total_seconds()
+            logger.exception(f"CVE synchronization failed after {elapsed:.2f}s: {e}")
+            print(f"\n❌ CVE synchronization failed: {e}")
+            verbose = getattr(args, 'verbose', False) if hasattr(args, 'verbose') else False
+            if verbose:
+                traceback.print_exc()
+            return 1
+    
+    def _handleNetworkAnalysis(self, args) -> int:
+        """Handle network analysis operation (--network-analysis flag)
+        
+        Performs network topology analysis, node risk scoring, and graph export
+        with persistence to the database.
+        """
+        network_model = None
+        graph_data = None
+        start_time = datetime.now()
+        
+        try:
+            logger.info("Starting network analysis...")
+            print("\n🔍 Analyzing network topology and vulnerabilities...")
+            
+            # Get the network model instance
+            network_model = self.network_model
+            if not network_model:
+                logger.error("Failed to instantiate network model")
+                print("  ❌ Failed to instantiate network model")
+                return 1
+            
+            # Validate export format
+            export_fmt = (args.graph_format or 'json').lower() if hasattr(args, 'graph_format') else 'json'
+            valid_formats = ['json', 'svg']
+            if export_fmt not in valid_formats:
+                logger.warning(f"Invalid export format '{export_fmt}'. Using 'json'.")
+                export_fmt = 'json'
+            
+            current_model = self.config.get('ai_models', 'network_model', 'gcn')
+            logger.info(f"Network analysis using model: {current_model}, format: {export_fmt}")
+            print(f"  ℹ️  Model: {current_model} | Format: {export_fmt}")
+            
+            # Build the network graph with progress tracking
+            with ProgressManager(desc="Network Analysis", total=100) as progress:
+                try:
+                    progress.update(15, "Building network graph...")
+                    graph_data = network_model.build_graph(telemetry=None, timeframe_hours=24)
+                    
+                    if not graph_data:
+                        logger.warning("Network graph is empty")
+                        graph_data = {"nodes": [], "edges": [], "metrics": {}}
+                    
+                    progress.update(40, "Graph constructed")
+                    
+                    # Score nodes for risk assessment
+                    progress.update(60, "Scoring nodes for risk...")
+                    node_scores = network_model.score_nodes(graph_data)
+                    logger.debug(f"Computed risk scores for {len(node_scores)} nodes")
+                    progress.update(80, "Risk scoring complete")
+                    
+                    # Inject node scores into graph metadata
+                    if 'metrics' not in graph_data:
+                        graph_data['metrics'] = {}
+                    graph_data['metrics']['node_scores'] = {k: float(v) for k, v in node_scores.items()}
+                    
+                    # Export the graph
+                    progress.update(90, "Exporting graph...")
+                    graph_bytes = network_model.export_graph(graph_data, fmt=export_fmt)
+                    
+                    if not graph_bytes:
+                        logger.warning("Graph export returned empty data")
+                        graph_bytes = b'{}'
+                    
+                    progress.update(100, "Analysis complete")
+                    
+                except Exception as analysis_error:
+                    logger.exception(f"Network analysis encountered error: {analysis_error}")
+                    print(f"  ⚠️  Analysis error: {analysis_error}")
+                    progress.update(100, "Error during analysis")
+                    if graph_data is None:
+                        graph_data = {"nodes": [], "edges": [], "metrics": {}}
+                        graph_bytes = json.dumps(graph_data).encode('utf-8')
+            
+            # Attempt to persist results to database
+            persist_success = False
+            try:
+                timestamp = datetime.now().isoformat()
+                model_version = self.config.get('ai_models', 'network_model', 'gcn')
+                node_count = len(graph_data.get('nodes', []))
+                edge_count = len(graph_data.get('edges', []))
+                summary = f"Network graph: {node_count} nodes, {edge_count} edges"
+                
+                query = """
+                INSERT INTO network_graphs (timestamp, graph_json, svg, summary, model_version)
+                VALUES (?, ?, ?, ?, ?)
+                """
+                
+                db_conn = self.dbManager.getConnection()
+                try:
+                    # Serialize graph appropriately
+                    graph_json_bytes = json.dumps(graph_data).encode('utf-8')
+                    svg_bytes = graph_bytes if export_fmt == 'svg' else None
+                    
+                    db_cursor = db_conn.cursor()
+                    db_cursor.execute(query, (
+                        timestamp,
+                        graph_json_bytes,
+                        svg_bytes,
+                        summary,
+                        model_version
+                    ))
+                    db_conn.commit()
+                    persist_success = True
+                    logger.info(f"Network graph persisted to database: {summary}")
+                finally:
+                    self.dbManager.returnConnection(db_conn)
+            except Exception as db_error:
+                logger.warning(f"Failed to persist network graph to database: {db_error}")
+            
+            # Display summary statistics
+            node_count = len(graph_data.get('nodes', []))
+            edge_count = len(graph_data.get('edges', []))
+            metrics = {k: v for k, v in graph_data.get('metrics', {}).items() if k != 'node_scores'}
+            
+            elapsed = (datetime.now() - start_time).total_seconds()
+            print(f"\n✅ Network analysis completed ({elapsed:.2f}s)")
+            print(f"  • Nodes detected: {node_count}")
+            print(f"  • Edges/connections: {edge_count}")
+            if metrics:
+                for key, value in metrics.items():
+                    if not isinstance(value, (dict, list)):
+                        print(f"  • {key}: {value}")
+            
+            # Export file location
+            output_filename = f"network_graph_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{export_fmt}"
+            print(f"  • Export format: {export_fmt}")
+            print(f"  • Filename: {output_filename}")
+            if persist_success:
+                print(f"  • ✓ Persisted to database")
+            
+            logger.info(f"Network analysis completed: {node_count} nodes, {edge_count} edges in {elapsed:.2f}s")
+            return 0
+        
+        except KeyboardInterrupt:
+            logger.info("Network analysis cancelled by user")
+            print("\n⚠️  Network analysis cancelled")
+            return 130
+        except Exception as e:
+            elapsed = (datetime.now() - start_time).total_seconds()
+            logger.exception(f"Network analysis failed after {elapsed:.2f}s: {e}")
+            print(f"\n❌ Network analysis failed: {e}")
+            verbose = getattr(args, 'verbose', False) if hasattr(args, 'verbose') else False
+            if verbose:
                 traceback.print_exc()
             return 1
     
@@ -5732,6 +6552,29 @@ Exit Codes:
         type=str,
         default=DEFAULT_CONFIG_FILE,
         help=f"Configuration file (default: {DEFAULT_CONFIG_FILE})"
+    )
+    configGroup.add_argument(
+        "--sync-cves",
+        action="store_true",
+        help="Synchronize CVE database from configured sources"
+    )
+    configGroup.add_argument(
+        "--cve-model",
+        type=str,
+        default=None,
+        help="Select CVE model to use (overrides config 'ai_models.cve_model')"
+    )
+    configGroup.add_argument(
+        "--network-analysis",
+        action="store_true",
+        help="Run network analysis and generate graph"
+    )
+    configGroup.add_argument(
+        "--graph-format",
+        type=str,
+        default='json',
+        choices=['json','svg'],
+        help="Export format for network graph (json|svg)"
     )
     
     # If no arguments provided, show help

@@ -1,9 +1,17 @@
-requests
-urllib3
-tqdm
-colorama
-psutil
-packaging
-pyyaml
-pywin32; platform_system == "Windows"
-pytest
+requests>=2.28.0
+urllib3>=1.26.0
+tqdm>=4.64.0
+colorama>=0.4.5
+psutil>=5.9.0
+packaging>=21.3
+pyyaml>=6.0
+pywin32>=305; platform_system == "Windows"
+pytest>=7.2.0
+
+# Optional AI/ML dependencies (install when needed)
+# transformers>=4.30.0        # For SecureBERT, CyberBERT models
+# torch>=2.0.0                # For model inference
+# torch-geometric>=2.3.0      # For GNN models (GCN, GAT, TGNN)
+# scikit-learn>=1.2.0         # For anomaly detection (Anomal-E)
+# numpy>=1.24.0               # For numerical operations
+# scipy>=1.10.0               # For graph analysis
