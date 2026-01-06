@@ -3,7 +3,7 @@ name = "avrps"
 version = "3.0.0"
 description = "Advanced Vulnerability Remediation and Patching System"
 readme = "README.md"
-authors = [{ name = "mr_h4shtag", url = "https://github.com/mr_h4shtag" }]
+authors = [{ name = "MrAmirRezaie", url = "https://github.com/MrAmirRezaie" }]
 requires-python = ">=3.7"
 
 [project.dependencies]
