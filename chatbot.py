@@ -225,6 +225,20 @@ class IntentRecognizer:
                     "about AVRPS",
                     "show info"
                 ]
+            },
+            IntentType.CONFIGURE: {
+                "description": "Configure AVRPS settings",
+                "keywords": ["configure", "config", "settings", "setup", "preferences", "options", "manage cve"],
+                "examples": [
+                    "configure AVRPS",
+                    "update settings",
+                    "manage CVE databases"
+                ]
+            },
+            IntentType.UNKNOWN: {
+                "description": "Unknown intent",
+                "keywords": [],
+                "examples": []
             }
         }
     
@@ -629,7 +643,10 @@ class AVRPSChatbot:
             
             result = subprocess.run(
                 cmd,
-                cwd=os.path.dirname(os.path.abspath(__file__))
+                cwd=os.path.dirname(os.path.abspath(__file__)),
+                encoding='utf-8',
+                errors='replace',
+                capture_output=False
             )
             
             success = result.returncode == 0
