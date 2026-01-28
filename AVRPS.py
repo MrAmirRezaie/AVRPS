@@ -2421,12 +2421,12 @@ class SystemScanner:
                 # Fallback to command-line tools
                 if self.osType == OperatingSystem.LINUX:
                     result = subprocess.run(['df', '-h', '--total'], 
-                                          capture_output=True, text=True, encoding='utf-8')
+                                          capture_output=True, text=True, encoding='utf-8', errors='replace')
                     diskInfo['df_output'] = result.stdout
                 
                 elif self.osType == OperatingSystem.WINDOWS:
                     result = subprocess.run(['wmic', 'logicaldisk', 'get', 'size,freespace,caption'], 
-                                          capture_output=True, text=True, shell=True, encoding='utf-8')
+                                          capture_output=True, text=True, shell=True, encoding='utf-8', errors='replace')
                     diskInfo['wmic_output'] = result.stdout
         
         except Exception as e:
@@ -2495,14 +2495,14 @@ class SystemScanner:
                     try:
                         # Try ip command first
                         result = subprocess.run(['ip', '-j', 'addr'], 
-                                              capture_output=True, text=True, encoding='utf-8')
+                                              capture_output=True, text=True, encoding='utf-8', errors='replace')
                         if result.returncode == 0:
                             interfaces = json.loads(result.stdout)
                     except:
                         try:
                             # Try ifconfig
                             result = subprocess.run(['ifconfig', '-a'], 
-                                                  capture_output=True, text=True, encoding='utf-8')
+                                                  capture_output=True, text=True, encoding='utf-8', errors='replace')
                             # Parse ifconfig output (simplified)
                             currentInterface = {}
                             for line in result.stdout.split('\n'):
@@ -2525,7 +2525,7 @@ class SystemScanner:
                 elif self.osType == OperatingSystem.WINDOWS:
                     try:
                         result = subprocess.run(['ipconfig', '/all'], 
-                                              capture_output=True, text=True, shell=True, encoding='utf-8')
+                                              capture_output=True, text=True, shell=True, encoding='utf-8', errors='replace')
                         # Parse ipconfig output (simplified)
                         currentInterface = {}
                         for line in result.stdout.split('\n'):
@@ -2626,7 +2626,7 @@ class SystemScanner:
             # Use dpkg-query for better format control
             cmd = ["dpkg-query", "-W", 
                    "-f=${Package}|${Version}|${Architecture}|${Status}|${Installed-Size}\n"]
-            result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8')
+            result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace')
             
             for line in result.stdout.strip().split('\n'):
                 if not line:
@@ -2663,7 +2663,7 @@ class SystemScanner:
         try:
             cmd = ["rpm", "-qa", "--queryformat", 
                    "%{NAME}|%{VERSION}|%{RELEASE}|%{ARCH}|%{VENDOR}|%{INSTALLTIME}|%{SIZE}|%{SUMMARY}\n"]
-            result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8')
+            result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace')
             
             for line in result.stdout.strip().split('\n'):
                 if not line:
@@ -2705,7 +2705,7 @@ class SystemScanner:
         
         try:
             cmd = ["pacman", "-Q"]
-            result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8')
+            result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace')
             
             for line in result.stdout.strip().split('\n'):
                 if not line:
@@ -2718,7 +2718,7 @@ class SystemScanner:
                     # Try to get more info
                     try:
                         infoCmd = ["pacman", "-Qi", name]
-                        infoResult = subprocess.run(infoCmd, capture_output=True, text=True, encoding='utf-8')
+                        infoResult = subprocess.run(infoCmd, capture_output=True, text=True, encoding='utf-8', errors='replace')
                         infoLines = infoResult.stdout.split('\n')
                         
                         installDate = None
@@ -2761,7 +2761,7 @@ class SystemScanner:
         
         try:
             cmd = ["apk", "info", "-v"]
-            result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8')
+            result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace')
             
             for line in result.stdout.strip().split('\n'):
                 if not line:
@@ -2796,7 +2796,7 @@ class SystemScanner:
         
         try:
             cmd = ["qlist", "-Iv"]
-            result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8')
+            result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace')
             
             for line in result.stdout.strip().split('\n'):
                 if not line:
@@ -2833,7 +2833,7 @@ class SystemScanner:
         
         try:
             cmd = ["zypper", "search", "-i", "-s"]
-            result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8')
+            result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace')
             
             # Parse zypper output (this is simplified)
             for line in result.stdout.strip().split('\n'):
@@ -2909,7 +2909,7 @@ class SystemScanner:
         try:
             # This is a simplified approach
             cmd = ["rpm", "-qa", "--dbpath", dbPath]
-            result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8')
+            result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace')
             
             for pkgSpec in result.stdout.strip().split('\n'):
                 if pkgSpec and '-' in pkgSpec:
@@ -5676,55 +5676,60 @@ class ReportGenerator:
     def saveReport(report: Dict[str, Any], formatType: str = "all", 
                   outputDir: str = "reports") -> Dict[str, str]:
         """Save report in multiple formats"""
-        Path(outputDir).mkdir(exist_ok=True)
-        
+        # Ensure output directory exists (create parent directories as needed)
+        try:
+            Path(outputDir).mkdir(parents=True, exist_ok=True)
+        except Exception:
+            # Fallback to os.makedirs for older environments
+            try:
+                os.makedirs(outputDir, exist_ok=True)
+            except Exception as e:
+                logger.error(f"Unable to create report directory '{outputDir}': {e}")
+                return {}
+
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        hostname = report['systemInfo']['hostname'].replace(' ', '_').replace('.', '_')
+        hostname = str(report.get('systemInfo', {}).get('hostname', 'unknown')).replace(' ', '_').replace('.', '_')
         baseFilename = f"vulnerability_report_{hostname}_{timestamp}"
-        
+
         savedFiles = {}
-        
-        formats = []
-        if formatType == "all":
-            formats = ["json", "html", "txt", "pdf"]
-        else:
-            formats = [formatType]
-        
+
+        formats = [formatType] if formatType != "all" else ["json", "html", "txt", "pdf"]
+
         for fmt in formats:
             try:
                 if fmt == "json":
-                    filename = f"{outputDir}/{baseFilename}.json"
-                    with open(filename, 'w', encoding='utf-8') as f:
+                    path = Path(outputDir) / f"{baseFilename}.json"
+                    with open(path, 'w', encoding='utf-8') as f:
                         json.dump(report, f, indent=2, default=str)
-                    savedFiles['json'] = filename
-                
+                    savedFiles['json'] = str(path)
+
                 elif fmt == "html":
-                    filename = f"{outputDir}/{baseFilename}.html"
+                    path = Path(outputDir) / f"{baseFilename}.html"
                     htmlContent = ReportGenerator.generateHtmlReport(report)
-                    with open(filename, 'w', encoding='utf-8') as f:
+                    with open(path, 'w', encoding='utf-8') as f:
                         f.write(htmlContent)
-                    savedFiles['html'] = filename
-                
+                    savedFiles['html'] = str(path)
+
                 elif fmt == "txt":
-                    filename = f"{outputDir}/{baseFilename}.txt"
+                    path = Path(outputDir) / f"{baseFilename}.txt"
                     txtContent = ReportGenerator.generateTextReport(report)
-                    with open(filename, 'w', encoding='utf-8') as f:
+                    with open(path, 'w', encoding='utf-8') as f:
                         f.write(txtContent)
-                    savedFiles['txt'] = filename
-                
+                    savedFiles['txt'] = str(path)
+
                 elif fmt == "pdf":
                     # PDF generation would require additional libraries
-                    # For now, we'll create a placeholder
-                    filename = f"{outputDir}/{baseFilename}.pdf.txt"
-                    with open(filename, 'w', encoding='utf-8') as f:
+                    # For now, create a placeholder text file explaining requirements
+                    path = Path(outputDir) / f"{baseFilename}.pdf.txt"
+                    with open(path, 'w', encoding='utf-8') as f:
                         f.write("PDF export requires additional libraries (reportlab, weasyprint).\n")
                         f.write("Install with: pip install reportlab weasyprint\n")
                         f.write("\nJSON report is available for PDF conversion.\n")
-                    savedFiles['pdf'] = filename
-            
+                    savedFiles['pdf'] = str(path)
+
             except Exception as e:
                 logger.error(f"Failed to save {fmt} report: {e}")
-        
+
         return savedFiles
     
     @staticmethod

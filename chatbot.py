@@ -644,6 +644,7 @@ class AVRPSChatbot:
             result = subprocess.run(
                 cmd,
                 cwd=os.path.dirname(os.path.abspath(__file__)),
+                text=True,
                 encoding='utf-8',
                 errors='replace',
                 capture_output=False
@@ -675,7 +676,7 @@ class AVRPSChatbot:
             if not target_file:
                 return False
             
-            with open(target_file, 'w') as f:
+            with open(target_file, 'w', encoding='utf-8') as f:
                 json.dump({
                     "session_start": self.session_start.isoformat(),
                     "session_end": datetime.now().isoformat(),
@@ -700,10 +701,18 @@ class AVRPSChatbot:
             True if loaded successfully, False otherwise
         """
         try:
-            with open(filepath, 'r') as f:
+            with open(filepath, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-                self.conversation_history = data.get("history", [])
-                logger.info(f"✓ History loaded from {filepath}")
+            # Restore session metadata if available
+            session_start = data.get("session_start")
+            if session_start:
+                try:
+                    self.session_start = datetime.fromisoformat(session_start)
+                except Exception:
+                    self.session_start = datetime.now()
+
+            self.conversation_history = data.get("history", [])
+            logger.info(f"✓ History loaded from {filepath}")
             return True
         except Exception as e:
             logger.error(f"✗ Failed to load history: {e}")
