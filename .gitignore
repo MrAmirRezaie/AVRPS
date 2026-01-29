@@ -28,6 +28,7 @@ share/python-wheels/
 MANIFEST
 reports/
 vulnerability_database.db
+snapshots/
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
