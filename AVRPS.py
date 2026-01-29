@@ -51,8 +51,6 @@ from xml.etree import ElementTree
 import csv
 import pickle
 import re
-import json
-import hashlib
 
 # Third-party imports with graceful fallbacks
 THIRD_PARTY_IMPORTS = {}
